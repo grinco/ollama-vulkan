@@ -53,7 +53,7 @@ var (
 	NvmlMgmtName   = "" // not currently wired on linux
 	OneapiMgmtName = "libze_intel_gpu.so*"
 	VulkanMgmtName = "libvulkan.so*"
-	libcapMgmtName = "libcap.so*"
+	LibcapMgmtName = "libcap.so*"
 )
 
 var VulkanGlobs = []string{
@@ -62,14 +62,14 @@ var VulkanGlobs = []string{
 	"/usr/lib*/libvulkan.so*",
 }
 
-var capLinuxGlobs = []string{
+var LibcapLinuxGlobs = []string{
 	"/usr/lib/x86_64-linux-gnu/libcap.so*",
-	"/usr/lib/aarch64-linux-gnu/libvulkan.so*",
+	"/usr/lib/aarch64-linux-gnu/libcap.so*",
 	"/usr/lib*/libcap.so*",
 }
 
 func FindLibCapLibs() []string {
-	return FindGPULibs(libcapMgmtName, capLinuxGlobs)
+	return FindGPULibs(LibcapMgmtName, LibcapLinuxGlobs)
 }
 
 func GetCPUMem() (memInfo, error) {
