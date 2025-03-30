@@ -30,22 +30,53 @@ typedef struct {
   void (*vkGetPhysicalDeviceProperties)(
     VkPhysicalDevice                            physicalDevice,
     VkPhysicalDeviceProperties*                 pProperties);
+
   VkResult (*vkEnumerateDeviceExtensionProperties)(
       VkPhysicalDevice                            physicalDevice,
       const char*                                 pLayerName,
       uint32_t*                                   pPropertyCount,
       VkExtensionProperties*                      pProperties);
+
+  void (*vkGetPhysicalDeviceMemoryProperties2)(
+      VkPhysicalDevice                            physicalDevice,
+      VkPhysicalDeviceMemoryProperties2*          pMemoryProperties);
+
+  void (*vkGetPhysicalDeviceQueueFamilyProperties)(
+      VkPhysicalDevice                            physicalDevice,
+      uint32_t*                                   pQueueFamilyPropertyCount,
+      VkQueueFamilyProperties*                    pQueueFamilyProperties);
+
+  VkResult (*vkAllocateMemory)(
+      VkDevice                                    device,
+      const VkMemoryAllocateInfo*                 pAllocateInfo,
+      const VkAllocationCallbacks*                pAllocator,
+      VkDeviceMemory*                             pMemory);
+
+  VkResult (*vkCreateDevice)(
+      VkPhysicalDevice                            physicalDevice,
+      const VkDeviceCreateInfo*                   pCreateInfo,
+      const VkAllocationCallbacks*                pAllocator,
+      VkDevice*                                   pDevice);
+
   VkResult (*vkCreateInstance)(
       const VkInstanceCreateInfo*                 pCreateInfo,
       const VkAllocationCallbacks*                pAllocator,
       VkInstance*                                 pInstance);
+
   VkResult (*vkEnumeratePhysicalDevices)(
       VkInstance                                  instance,
       uint32_t*                                   pPhysicalDeviceCount,
       VkPhysicalDevice*                           pPhysicalDevices);
-  void (*vkGetPhysicalDeviceMemoryProperties2)(
-      VkPhysicalDevice                            physicalDevice,
-      VkPhysicalDeviceMemoryProperties2*          pMemoryProperties);
+
+  void (*vkFreeMemory)(
+      VkDevice                                    device,
+      VkDeviceMemory                              memory,
+      const VkAllocationCallbacks*                pAllocator);
+
+  void (*vkDestroyDevice)(
+      VkDevice                                    device,
+      const VkAllocationCallbacks*                pAllocator);
+
   void (*vkDestroyInstance)(
       VkInstance                                  instance,
       const VkAllocationCallbacks*                pAllocator);

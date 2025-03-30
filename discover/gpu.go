@@ -557,7 +557,7 @@ func GetGPUInfo() GpuInfoList {
 			}
 			C.vk_check_vram(*vHandles.vulkan, C.int(gpu.index), &memInfo)
 			// TODO - convert this to MinimumMemory based on testing...
-			var totalFreeMem float64 = float64(memInfo.free) * 0.95 // work-around: leave some reserve vram for mkl lib used in ggml-sycl backend.
+			var totalFreeMem float64 = float64(memInfo.free)
 			memInfo.free = C.uint64_t(totalFreeMem)
 			vulkanGPUs[i].FreeMemory = uint64(memInfo.free)
 		}

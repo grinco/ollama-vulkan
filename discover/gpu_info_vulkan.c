@@ -1,6 +1,7 @@
 #include "gpu_info_vulkan.h"
 
 #include <string.h>
+#include <limits.h>
 
 int check_perfmon(vk_handle_t* rh) {
 #ifdef __linux__
@@ -72,9 +73,14 @@ void vk_init(char* vk_lib_path, char* cap_lib_path, vk_init_resp_t *resp) {
 #endif
       {0, "vkGetPhysicalDeviceProperties", (void *)&resp->ch.vkGetPhysicalDeviceProperties},
       {0, "vkEnumerateDeviceExtensionProperties", (void *)&resp->ch.vkEnumerateDeviceExtensionProperties},
+      {0, "vkGetPhysicalDeviceMemoryProperties2", (void *)&resp->ch.vkGetPhysicalDeviceMemoryProperties2},
+      {0, "vkGetPhysicalDeviceQueueFamilyProperties", (void *)&resp->ch.vkGetPhysicalDeviceQueueFamilyProperties},
+      {0, "vkAllocateMemory", (void *)&resp->ch.vkAllocateMemory},
+      {0, "vkCreateDevice", (void *)&resp->ch.vkCreateDevice},
       {0, "vkCreateInstance", (void *)&resp->ch.vkCreateInstance},
       {0, "vkEnumeratePhysicalDevices", (void *)&resp->ch.vkEnumeratePhysicalDevices},
-      {0, "vkGetPhysicalDeviceMemoryProperties2", (void *)&resp->ch.vkGetPhysicalDeviceMemoryProperties2},
+      {0, "vkFreeMemory", (void *)&resp->ch.vkFreeMemory},
+      {0, "vkDestroyDevice", (void *)&resp->ch.vkDestroyDevice},
       {0, "vkDestroyInstance", (void *)&resp->ch.vkDestroyInstance},
       {0, NULL, NULL},
   };
@@ -205,6 +211,72 @@ int vk_check_flash_attention(vk_handle_t rh, int i) {
   return 0;
 }
 
+// For debug messages
+const char* memoryPropertyFlagsToString(VkMemoryPropertyFlags flags) {
+  static char buffer[256];
+  buffer[0] = '\0';
+
+  if (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+    strcat(buffer, "DEVICE_LOCAL ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+    strcat(buffer, "HOST_VISIBLE ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
+    strcat(buffer, "HOST_COHERENT ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
+    strcat(buffer, "HOST_CACHED ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) {
+    strcat(buffer, "LAZILY_ALLOCATED ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_PROTECTED_BIT) {
+    strcat(buffer, "PROTECTED ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD) {
+    strcat(buffer, "DEVICE_COHERENT_AMD ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD) {
+    strcat(buffer, "DEVICE_UNCACHED_AMD ");
+  }
+  if (flags & VK_MEMORY_PROPERTY_RDMA_CAPABLE_BIT_NV) {
+    strcat(buffer, "RDMA_CAPABLE_NV ");
+  }
+
+  if (buffer[0] != '\0') {
+    buffer[strlen(buffer) - 1] = '\0';
+  }
+
+  return buffer;
+}
+
+// For debug messages
+const char* physicalDeviceTypeToString(VkPhysicalDeviceType type) {
+  switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+      return "Other";
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+      return "Integrated GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+      return "Discrete GPU";
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+      return "Virtual GPU";
+    default: // Shouldn't reach
+      return "Unknown?";
+  }
+}
+
+// Helper function to count bits in VkMemoryPropertyFlags.
+uint32_t countBits(VkMemoryPropertyFlags flags) {
+  uint32_t count = 0;
+  while (flags) {
+    count += flags & 1;
+    flags >>= 1;
+  }
+  return count;
+}
+
 void vk_check_vram(vk_handle_t rh, int i, mem_info_t *resp) {
   VkInstance instance = rh.vk;
   uint32_t deviceCount = rh.num_devices;
@@ -224,6 +296,7 @@ void vk_check_vram(vk_handle_t rh, int i, mem_info_t *resp) {
 
   VkPhysicalDeviceProperties properties;
   (*rh.vkGetPhysicalDeviceProperties)(devices[i], &properties);
+  LOG(rh.verbose, "Device: %s\n", properties.deviceName);
 
   int supports_budget = is_extension_supported(&rh, devices[i], VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
   if (!supports_budget) {
@@ -232,6 +305,7 @@ void vk_check_vram(vk_handle_t rh, int i, mem_info_t *resp) {
     return;
   }
 
+  // CPUs aren't considered
   if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
     free(devices);
     resp->err = strdup("device is a CPU");
@@ -246,18 +320,180 @@ void vk_check_vram(vk_handle_t rh, int i, mem_info_t *resp) {
   device_memory_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
   device_memory_properties.pNext = &physical_device_memory_budget_properties;
 
+  // Query device memory information
   (*rh.vkGetPhysicalDeviceMemoryProperties2)(devices[i], &device_memory_properties);
+
+  LOG(rh.verbose, "Device type: %s\n", physicalDeviceTypeToString(properties.deviceType));
+
+  VkPhysicalDeviceMemoryProperties memoryProps = device_memory_properties.memoryProperties;
+
+  // HEURISTIC
+  // Find memory type with least amount of flags for each heap
+  uint32_t shortestMemoryTypes[memoryProps.memoryHeapCount];
+
+  for (uint32_t heapIndex = 0; heapIndex < memoryProps.memoryHeapCount; heapIndex++) {
+    uint32_t bestMemoryTypeIndex = UINT_MAX;
+    uint32_t minFlagCount = UINT_MAX;
+
+    // Iterate over all memory types.
+    for (uint32_t typeIndex = 0; typeIndex < memoryProps.memoryTypeCount; typeIndex++) {
+      // Check if the memory type belongs to the current heap.
+      if (memoryProps.memoryTypes[typeIndex].heapIndex == heapIndex) {
+        VkMemoryPropertyFlags flags = memoryProps.memoryTypes[typeIndex].propertyFlags;
+        uint32_t flagCount = countBits(flags);
+
+        // Use the first valid memory type, or update if this one has fewer bits set.
+        if (bestMemoryTypeIndex == UINT_MAX || flagCount < minFlagCount) {
+          bestMemoryTypeIndex = typeIndex;
+          minFlagCount = flagCount;
+        }
+      }
+    }
+
+    LOG(rh.verbose, "Heap %u: Best memory type index %u with %u flags set (0x%x)\n",
+        heapIndex, bestMemoryTypeIndex, minFlagCount, memoryProps.memoryTypes[bestMemoryTypeIndex].propertyFlags);
+    shortestMemoryTypes[heapIndex] = bestMemoryTypeIndex;
+  }
 
   VkDeviceSize device_memory_total_size  = 0;
   VkDeviceSize device_memory_heap_budget = 0;
 
-  for (uint32_t j = 0; j < device_memory_properties.memoryProperties.memoryHeapCount; j++) {
+  uint32_t bestHeapIndex = 0; // TODO maybe needs to be an array?
+  LOG(rh.verbose, "MemoryHeap count: %u, MemoryType count: %u\n", memoryProps.memoryHeapCount, memoryProps.memoryTypeCount);
+  for (uint32_t j = 0; j < memoryProps.memoryHeapCount; j++) {
     VkMemoryHeap heap = device_memory_properties.memoryProperties.memoryHeaps[j];
-    if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-      device_memory_total_size  += heap.size;
-      device_memory_heap_budget += physical_device_memory_budget_properties.heapBudget[j];
+    uint32_t shortestMemoryType = shortestMemoryTypes[j];
+    VkMemoryPropertyFlags shortestFlags = memoryProps.memoryTypes[shortestMemoryType].propertyFlags;
+
+    switch (properties.deviceType) {
+      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        // Only DEVICE_LOCAL heaps, NOT DEVICE_LOCAL & HOST_VISIBLE, those
+        // are likely virtual (Re)BAR variants/copies that we shouldn't count.
+        // Probably mostly relevant for older GPUs, two examples I know are
+        // Nvidia GTX970 and AMD RX580.
+        // Should work normally for modern GPUs, this is mostly a workaround for
+        // the older ones.
+        if ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+            !(shortestFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT &&
+              shortestFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+          device_memory_total_size  += heap.size;
+          device_memory_heap_budget += physical_device_memory_budget_properties.heapBudget[j];
+          bestHeapIndex = j; // TODO better selection?
+        }
+        break;
+      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+      case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+        // iGPUs/APUs are often only DEVICE_LOCAL and HOST_VISIBLE and need special handling.
+        // This code path should also work fine for VIRTUAL_GPUs, and if they exist, for the
+        // OTHER type too.
+        if ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && (shortestFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+          device_memory_total_size  += heap.size;
+          device_memory_heap_budget += physical_device_memory_budget_properties.heapBudget[j];
+          bestHeapIndex = j; // TODO better selection?
+        }
+        break;
+      default:
+        break;
     }
   }
+
+  if (rh.verbose) {
+    for (uint32_t i = 0; i < device_memory_properties.memoryProperties.memoryTypeCount; i++) {
+      VkMemoryType memoryType = device_memory_properties.memoryProperties.memoryTypes[i];
+
+      LOG(rh.verbose, "Memory Type %d: Heap Index = %d, Property Flags = %s\n",
+          i, memoryType.heapIndex, memoryPropertyFlagsToString(memoryType.propertyFlags));
+    }
+  }
+
+  // DYNAMIC MEMORY ESTIMATION
+
+  // Get queue families
+  uint32_t queueFamilyCount = 0;
+  (*rh.vkGetPhysicalDeviceQueueFamilyProperties)(devices[i], &queueFamilyCount, NULL);
+  VkQueueFamilyProperties* queueFamilies = malloc(queueFamilyCount * sizeof(VkQueueFamilyProperties));
+  (*rh.vkGetPhysicalDeviceQueueFamilyProperties)(devices[i], &queueFamilyCount, queueFamilies);
+
+  // Find compute family
+  int computeFamilyIndex = -1;
+  for (uint32_t i = 0; i < queueFamilyCount; i++) {
+    if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+      computeFamilyIndex = i;
+      break;
+    }
+  }
+
+  free(queueFamilies);
+
+  if (computeFamilyIndex == -1) {
+    free(devices);
+    resp->err = strdup("failed to find a compute queue family");
+    return;
+  }
+
+  // Setup VkDevice
+  float queuePriority = 1.0f;
+  VkDeviceQueueCreateInfo queueCreateInfo = {};
+  queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+  queueCreateInfo.queueFamilyIndex = computeFamilyIndex;
+  queueCreateInfo.queueCount = 1;
+  queueCreateInfo.pQueuePriorities = &queuePriority;
+
+  VkDeviceCreateInfo createInfo = {};
+  createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+  createInfo.pQueueCreateInfos = &queueCreateInfo;
+  createInfo.queueCreateInfoCount = 1;
+  createInfo.pEnabledFeatures = NULL;
+
+  const char* deviceExtensions[] = {};
+  createInfo.enabledExtensionCount = sizeof(deviceExtensions) / sizeof(deviceExtensions[0]);
+  createInfo.ppEnabledExtensionNames = deviceExtensions;
+
+  VkDevice device;
+  result = (*rh.vkCreateDevice)(devices[i], &createInfo, NULL, &device);
+  if (result != VK_SUCCESS) {
+    free(devices);
+    resp->err = strdup("unable to create VkDevice for memory estimation");
+    return;
+  }
+
+  VkMemoryAllocateInfo allocInfo = {0};
+  allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocInfo.allocationSize = device_memory_heap_budget;
+  allocInfo.memoryTypeIndex = shortestMemoryTypes[bestHeapIndex];
+
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  uint64_t originalSize = allocInfo.allocationSize;
+  uint64_t successfulAllocationSize = 0; // NEW VARIABLE TO STORE SUCCESSFUL SIZE
+
+  do {
+    result = (*rh.vkAllocateMemory)(device, &allocInfo, NULL, &memory);
+
+    if (result == VK_SUCCESS) {
+      successfulAllocationSize = allocInfo.allocationSize; // SAVE SIZE ON SUCCESS
+      LOG(rh.verbose, "Allocation of size %zu on heap %d successful!\n",
+          (uint64_t) allocInfo.allocationSize, bestHeapIndex);
+      (*rh.vkFreeMemory)(device, memory, NULL);
+      break;
+    } else {
+      LOG(rh.verbose, "Allocation of size %zu on heap %d failed.\n",
+          (uint64_t) allocInfo.allocationSize, bestHeapIndex);
+
+      // TODO CHANGE TO BINARY SEARCH!
+      // Calculate new allocation size (1% reduction)
+      uint64_t reduction = originalSize / 100;
+      if (reduction == 0) reduction = 1; // Ensure minimum reduction of 1 byte
+      allocInfo.allocationSize -= reduction;
+
+      if (allocInfo.allocationSize == 0) {
+        LOG(rh.verbose, "Allocation failed completely - no memory available\n");
+        break;
+      }
+    }
+  } while (1);
+
+  (*rh.vkDestroyDevice)(device, NULL);
 
   free(devices);
 
@@ -266,7 +502,7 @@ void vk_check_vram(vk_handle_t rh, int i, mem_info_t *resp) {
   resp->gpu_name[GPU_NAME_LEN - 1] = '\0';
   strncpy(&resp->gpu_name[0], properties.deviceName, GPU_NAME_LEN - 1);
   resp->total = (uint64_t) device_memory_total_size;
-  resp->free = (uint64_t) device_memory_heap_budget;
+  resp->free = (uint64_t) successfulAllocationSize;
   resp->major = VK_API_VERSION_MAJOR(properties.apiVersion);
   resp->minor = VK_API_VERSION_MINOR(properties.apiVersion);
   resp->patch = VK_API_VERSION_PATCH(properties.apiVersion);
